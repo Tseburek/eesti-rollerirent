@@ -1,0 +1,18 @@
+{
+  "name": "eesti-rollerirent",
+  "version": "1.0.0",
+  "description": "Rollerirendi platvormi andmebaas ja suurandmete seemneskript (Bun + PostgreSQL)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "skeem": "bun run laadi-skeem.ts",
+    "seed": "bun run seed.ts",
+    "kontroll": "bun run kontroll.ts"
+  },
+  "dependencies": {
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
