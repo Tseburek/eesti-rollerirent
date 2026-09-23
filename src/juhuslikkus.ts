@@ -49,6 +49,9 @@ export const SOOL = {
   hinnang: 577,
   hooldus: 691,
   tugipilet: 811,
+  rolleriPopulaarsus: 919,
+  soiduLisaandmed: 953,     // koordinaadid jm, lahutatud ajakava-loogikast
+  hoolduseLisaandmed: 977,  // tehnik, maksumus, märkused
 } as const;
 
 /** Täisarv vahemikus [min, max] (kaasa arvatud). */

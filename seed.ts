@@ -22,11 +22,12 @@ import {
   KONF,
   KASUTAJA_VEERUD, ridaKasutaja,
   ROLLER_VEERUD, ridaRoller,
-  SOIT_VEERUD, ridaSoit,
-  MAKSE_VEERUD, ridaMakse,
-  HINNANG_VEERUD, ridaHinnang,
+  SOIT_VEERUD,
+  MAKSE_VEERUD,
+  HINNANG_VEERUD,
   HOOLDUS_VEERUD, ridaHooldus,
   TUGIPILET_VEERUD, ridaTugipilet,
+  komplektSoit,
 } from './src/generaatorid.ts';
 
 // ---------------------------------------------------------------------------
@@ -132,6 +133,74 @@ async function taidaTabel(plaan: Plaan, toolisi: number): Promise<number> {
   return kirjutatud;
 }
 
+/**
+ * Täidab `soit` + `makse` + `hinnang` ÜHE läbimisega: iga id kohta arvutatakse
+ * rolleri ajakava (`soit()`) TÄPSELT ÜKS kord ja sellest tuletatakse kõik
+ * kolm rida, mis saadetakse kolme paralleelsesse COPY-vootu. See väldib
+ * sama rolleri ajakava kolmekordset taasarvutust (mis oleks juhtunud kolme
+ * eraldi tabelitäitmise korral, sest makse/hinnang sõltuvad soit-i andmetest).
+ */
+async function taidaSoitKomplekt(arv: number, toolisi: number): Promise<{ soit: number; makse: number; hinnang: number }> {
+  const partiisid: [number, number][] = [];
+  for (let algus = 1; algus <= arv; algus += KONF.partii) {
+    partiisid.push([algus, Math.min(arv, algus + KONF.partii - 1)]);
+  }
+
+  let jargmine = 0;
+  let soiteKirjutatud = 0, makseidKirjutatud = 0, hinnanguidKirjutatud = 0;
+  edenemine.set('soit', 0);
+  edenemine.set('makse', 0);
+  edenemine.set('hinnang', 0);
+
+  const toolineTood = Array.from({ length: Math.max(1, toolisi) }, async () => {
+    const c = await sql.reserve();
+    try {
+      await c.unsafe(`SET synchronous_commit = off;
+                      SET maintenance_work_mem = '256MB';
+                      SET client_min_messages = warning;`).simple();
+
+      for (;;) {
+        const i = jargmine++;
+        if (i >= partiisid.length) break;
+        const [algus, lopp] = partiisid[i]!;
+
+        const soidud: string[] = [];
+        const maksed: string[] = [];
+        const hinnangud: string[] = [];
+        for (let id = algus; id <= lopp; id++) {
+          const k = komplektSoit(id);
+          soidud.push(k.soit);
+          if (k.makse !== null) maksed.push(k.makse);
+          if (k.hinnang !== null) hinnangud.push(k.hinnang);
+        }
+
+        async function kirjutaVoog(tabel: string, veerud: string, read: string[]): Promise<void> {
+          if (read.length === 0) return;
+          const paring = c.unsafe(`COPY ${tabel} (${veerud}) FROM STDIN WITH (FORMAT csv, NULL '')`);
+          const voog = await (paring as unknown as { writable: () => Promise<NodeJS.WritableStream> }).writable();
+          await pipeline(Readable.from([Buffer.from(read.join(''), 'utf8')]), voog as never);
+        }
+
+        await kirjutaVoog('soit', SOIT_VEERUD, soidud);
+        await kirjutaVoog('makse', MAKSE_VEERUD, maksed);
+        await kirjutaVoog('hinnang', HINNANG_VEERUD, hinnangud);
+
+        soiteKirjutatud += soidud.length;
+        makseidKirjutatud += maksed.length;
+        hinnanguidKirjutatud += hinnangud.length;
+        edenemine.set('soit', soiteKirjutatud);
+        edenemine.set('makse', makseidKirjutatud);
+        edenemine.set('hinnang', hinnanguidKirjutatud);
+      }
+    } finally {
+      c.release();
+    }
+  });
+
+  await Promise.all(toolineTood);
+  return { soit: soiteKirjutatud, makse: makseidKirjutatud, hinnang: hinnanguidKirjutatud };
+}
+
 /** Iga 3 sekundi tagant üks edenemisrida, et pikk täitmine oleks jälgitav. */
 function alustaEdenemiseLogi(): ReturnType<typeof setInterval> {
   return setInterval(() => {
@@ -190,22 +259,23 @@ async function main() {
       ]),
   );
 
-  // -- 3. soit: suurim tabel, kõik töölised korraga ---------------------------
-  const soite = await etapp('3. soit', KONF.soite, () =>
-    taidaTabel({ tabel: 'soit', veerud: SOIT_VEERUD, arv: KONF.soite, rida: ridaSoit }, P),
+  // -- 3. soit + makse + hinnang ÜHE läbimisega (vt taidaSoitKomplekt) --------
+  //    Rolleri ajakava arvutatakse iga sõidu kohta ainult ÜKS kord, mitte
+  //    kolm korda (soit/makse/hinnang eraldi tabelitäitmiste peale kokku).
+  const kolmik = await etapp('3. soit + makse + hinnang (ühe läbimisega)', 0, () =>
+    taidaSoitKomplekt(KONF.soite, P),
   );
+  const soite = kolmik.soit, makseid = kolmik.makse, hinnanguid = kolmik.hinnang;
 
-  // -- 4. Sõidust/rollerist sõltuvad tabelid paralleelselt --------------------
-  const veerandP = Math.max(1, Math.floor(P / 4));
-  const [makseid, hinnanguid, hooldusi, pileteid] = await etapp(
-    '4. makse + hinnang + hooldus + tugipilet (paralleelselt)',
+  // -- 4. Rollerist sõltuvad ülejäänud tabelid paralleelselt -------------------
+  const poolP2 = Math.max(1, Math.floor(P / 2));
+  const [hooldusi, pileteid] = await etapp(
+    '4. hooldus + tugipilet (paralleelselt)',
     0,
     () =>
       Promise.all([
-        taidaTabel({ tabel: 'makse', veerud: MAKSE_VEERUD, arv: KONF.soite, rida: ridaMakse }, Math.max(1, Math.floor(P / 2))),
-        taidaTabel({ tabel: 'hinnang', veerud: HINNANG_VEERUD, arv: KONF.soite, rida: ridaHinnang }, veerandP),
-        taidaTabel({ tabel: 'hooldus', veerud: HOOLDUS_VEERUD, arv: KONF.hooldusi, rida: ridaHooldus }, veerandP),
-        taidaTabel({ tabel: 'tugipilet', veerud: TUGIPILET_VEERUD, arv: KONF.tugipileteid, rida: ridaTugipilet }, veerandP),
+        taidaTabel({ tabel: 'hooldus', veerud: HOOLDUS_VEERUD, arv: KONF.hooldusi, rida: ridaHooldus }, poolP2),
+        taidaTabel({ tabel: 'tugipilet', veerud: TUGIPILET_VEERUD, arv: KONF.tugipileteid, rida: ridaTugipilet }, poolP2),
       ]),
   );
 
@@ -217,14 +287,25 @@ async function main() {
     return null;
   });
 
-  // -- 6. Statistika ----------------------------------------------------------
-  await etapp('6. ANALYZE', 0, async () => {
-    await sql.unsafe('ANALYZE;').simple();
+  // -- 6. kasutaja.viimati_aktiivne_at tervikluse parandus --------------------
+  // Tõstab "viimati aktiivne" väärtust vajadusel kasutaja tegeliku viimase
+  // sõidu/tugipileti ajani, vt sql/paranda-viimati-aktiivne.sql.
+  await etapp('6. viimati_aktiivne_at parandus', 0, async () => {
+    await jooksutaFail(new URL('./sql/paranda-viimati-aktiivne.sql', import.meta.url).pathname);
     return null;
   });
 
-  // -- 7. Kontrollaruanne -----------------------------------------------------
-  log('7. Kontrollaruanne');
+  // -- 7. Statistika ------------------------------------------------------------
+  // VACUUM (mitte ainult ANALYZE): etapp 6 UPDATE-is suure hulga `kasutaja`
+  // ridu (viimati_aktiivne_at parandus), mis jätab maha "surnud" tuple'eid.
+  // VACUUM vabastab need kohe, mitte ei jäta autovacuum'i hooleks.
+  await etapp('7. VACUUM ANALYZE', 0, async () => {
+    await sql.unsafe('VACUUM (ANALYZE);').simple();
+    return null;
+  });
+
+  // -- 8. Kontrollaruanne -----------------------------------------------------
+  log('8. Kontrollaruanne');
   const loendid = await sql.unsafe(`
     SELECT 'kasutaja'  AS tabel, count(*) AS ridu FROM kasutaja
     UNION ALL SELECT 'roller',    count(*) FROM roller
@@ -247,6 +328,21 @@ async function main() {
       (SELECT count(*) FROM tugipilet p LEFT JOIN kasutaja k ON k.id = p.kasutaja_id WHERE k.id IS NULL) AS pilet_ilma_kasutajata
   `);
   console.table([orvud]);
+
+  const [ajalik] = await sql.unsafe(`
+    SELECT
+      (SELECT count(*) FROM soit s JOIN kasutaja k ON k.id = s.kasutaja_id
+         WHERE s.algus_at < k.registreeritud_at OR s.algus_at > k.viimati_aktiivne_at) AS soit_valjaspool_kasutaja_akent,
+      (SELECT count(*) FROM soit s JOIN roller r ON r.id = s.roller_id
+         WHERE s.algus_at::date < r.kasutuselevott) AS soit_enne_rolleri_soetamist,
+      (SELECT count(*) FROM (
+         SELECT roller_id, algus_at, lopp_at,
+                lag(lopp_at) OVER (PARTITION BY roller_id ORDER BY algus_at) AS eelmine_lopp
+         FROM (SELECT roller_id, algus_at, lopp_at FROM soit
+               UNION ALL SELECT roller_id, algus_at, lopp_at FROM hooldus) k
+       ) j WHERE algus_at < eelmine_lopp) AS rolleri_sundmuste_kattuvusi
+  `);
+  console.table([ajalik]);
 
   const [maht] = await sql.unsafe(`
     SELECT pg_size_pretty(sum(pg_total_relation_size(c.oid))) AS andmebaasi_maht

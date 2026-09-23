@@ -1,0 +1,55 @@
+services:
+  # PostgreSQL andmebaas.
+  db:
+    image: postgres:16
+    container_name: eesti-rollerirent-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rollerirent
+      POSTGRES_PASSWORD: rollerirent
+      POSTGRES_DB: rollerirent
+    ports:
+      - "5432:5432"
+    # Mäluseaded mass-sisestuseks: suuremad puhvrid kiirendavad COPY-t ja
+    # indeksite taastamist oluliselt väiksema mahuga vaikeseadete peale.
+    # Vt README p 3.8 "Vajalikud mäluseaded".
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c maintenance_work_mem=512MB
+      -c max_wal_size=2GB
+      -c checkpoint_timeout=15min
+      -c work_mem=32MB
+    volumes:
+      - eesti-rollerirent-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rollerirent -d rollerirent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Bun + seemneskript. Ei käivitu iseenesest (vt README p 3) — kasutatakse
+  # käsuga `docker compose run --rm seed <käsk>`, mis annab ligipääsu
+  # kõigile package.json scriptidele (skeem / seed / kontroll).
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://rollerirent:rollerirent@db:5432/rollerirent
+      SEEME: "20260920"
+      MASTAAP: "1"
+      PARALLEELSUS: "4"
+      PARTII: "25000"
+    volumes:
+      - .:/app
+      # Anonüümne volume node_modules jaoks — väldib, et hosti bind-mount
+      # (rida ülal) varjaks konteineris `bun install`-iga paigaldatud pakette.
+      - eesti-rollerirent-node-modules:/app/node_modules
+
+volumes:
+  eesti-rollerirent-pgdata:
+  eesti-rollerirent-node-modules:

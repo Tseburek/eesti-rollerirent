@@ -26,16 +26,61 @@ SELECT
 \echo '== 3. Ajaline loogika (kõik peavad olema 0) =='
 SELECT
   (SELECT count(*) FROM soit s JOIN kasutaja k ON k.id = s.kasutaja_id WHERE s.algus_at < k.registreeritud_at) AS soit_enne_registreerimist,
+  (SELECT count(*) FROM soit s JOIN kasutaja k ON k.id = s.kasutaja_id WHERE s.algus_at > k.viimati_aktiivne_at) AS soit_parast_viimast_aktiivsust,
   (SELECT count(*) FROM soit s JOIN roller r ON r.id = s.roller_id WHERE s.algus_at::date < r.kasutuselevott)  AS soit_enne_rolleri_soetamist,
   (SELECT count(*) FROM soit WHERE lopp_at < algus_at)                                                          AS negatiivne_kestus,
+  (SELECT count(*) FROM hooldus WHERE lopp_at < algus_at)                                                       AS hoolduse_negatiivne_kestus,
   (SELECT count(*) FROM makse m JOIN soit s ON s.id = m.soit_id WHERE m.makstud_at < s.lopp_at)                 AS makse_enne_soidu_lopu,
   (SELECT count(*) FROM soit s JOIN roller r ON r.id = s.roller_id WHERE s.linn_id <> r.linn_id)                AS roller_valest_linnast;
+
+\echo '== 3b. Rolleri sündmuste (sõit + hooldus) omavaheline kattuvus (peab olema 0) =='
+-- Ühel rolleril ei tohi kunagi kaks sündmust (sõit või hooldus) ajaliselt kattuda:
+-- iga sündmuse algus peab olema >= sama rolleri eelmise sündmuse lõpp.
+WITH kombineeritud AS (
+    SELECT roller_id, algus_at, lopp_at, 'soit'::text AS liik, id AS soit_id, NULL::bigint AS hooldus_id FROM soit
+    UNION ALL
+    SELECT roller_id, algus_at, lopp_at, 'hooldus'::text AS liik, NULL::bigint, id FROM hooldus
+),
+jarjestatud AS (
+    SELECT *,
+           lag(lopp_at)  OVER (PARTITION BY roller_id ORDER BY algus_at) AS eelmine_lopp,
+           lag(liik)     OVER (PARTITION BY roller_id ORDER BY algus_at) AS eelmine_liik,
+           lag(soit_id)  OVER (PARTITION BY roller_id ORDER BY algus_at) AS eelmine_soit_id,
+           lag(hooldus_id) OVER (PARTITION BY roller_id ORDER BY algus_at) AS eelmine_hooldus_id
+    FROM kombineeritud
+)
+SELECT count(*) AS kattuvaid_sundmuste_paare FROM jarjestatud WHERE algus_at < eelmine_lopp;
+
+-- Kui ülemine arv pole 0, näitab see päring konkreetsed kattuvad paarid (esimesed 20):
+WITH kombineeritud AS (
+    SELECT roller_id, algus_at, lopp_at, 'soit'::text AS liik, id FROM soit
+    UNION ALL
+    SELECT roller_id, algus_at, lopp_at, 'hooldus'::text AS liik, id FROM hooldus
+),
+jarjestatud AS (
+    SELECT *, lag(lopp_at) OVER (PARTITION BY roller_id ORDER BY algus_at) AS eelmine_lopp,
+           lag(liik) OVER (PARTITION BY roller_id ORDER BY algus_at) AS eelmine_liik,
+           lag(id) OVER (PARTITION BY roller_id ORDER BY algus_at) AS eelmine_id
+    FROM kombineeritud
+)
+SELECT roller_id, eelmine_liik, eelmine_id, eelmine_lopp, liik, id, algus_at
+FROM jarjestatud WHERE algus_at < eelmine_lopp
+LIMIT 20;
 
 \echo '== 4. Rahaline kooskõla (kõik peavad olema 0) =='
 SELECT
   (SELECT count(*) FROM makse m JOIN soit s ON s.id = m.soit_id WHERE m.summa_senti <> s.hind_senti) AS makse_summa_ei_klapi,
   (SELECT count(*) FROM soit s JOIN tariifipakett p ON p.id = s.tariifipakett_id
      WHERE s.hind_senti > 0 AND s.hind_senti <> p.avamistasu_senti + ceil(s.kestus_sek / 60.0) * p.minutihind_senti) AS hind_ei_vasta_tariifile;
+
+\echo '== 4b. Tugipiletite osakaal (kaks erinevat, mõlemad põhjendatud vaatenurka) =='
+SELECT
+  (SELECT count(*) FROM tugipilet)                          AS tugipileteid_kokku,
+  (SELECT count(*) FROM soit)                                AS soite_kokku,
+  round(100.0 * (SELECT count(*) FROM tugipilet) / (SELECT count(*) FROM soit), 2)          AS pileteid_100_soidu_kohta_pct,
+  (SELECT count(DISTINCT kasutaja_id) FROM tugipilet)         AS eri_kasutajaid_piletites,
+  (SELECT count(*) FROM kasutaja)                             AS kasutajaid_kokku,
+  round(100.0 * (SELECT count(DISTINCT kasutaja_id) FROM tugipilet) / (SELECT count(*) FROM kasutaja), 2) AS kasutajate_osakaal_piletites_pct;
 
 \echo '== 5. Andmete usutavus: sõidud kuude lõikes =='
 SELECT to_char(algus_at, 'YYYY-MM') AS kuu, count(*) AS soite, round(avg(kestus_sek) / 60.0, 1) AS keskm_min
