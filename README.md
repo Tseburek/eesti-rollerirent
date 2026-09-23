@@ -144,6 +144,12 @@ docker compose down -v         # peatab JA kustutab kõik andmed
 * **Docker Desktop (Mac/Windows):** eralda vähemalt **4 GB RAM ja 2 vCPU**
   (Settings → Resources) täismahus (2,6 mln rea) käivituseks mõistliku
   kiirusega. Väiksema eraldisega tasub kasutada `MASTAAP=0.05`..`0.2`.
+* **`/dev/shm` (jagatud mälu).** Docker piirab vaikimisi konteineri
+  `/dev/shm` 64 MB peale — sellest jääb väheks, kui PostgreSQL kasutab
+  indeksite loomisel või `VACUUM`-il paralleeltöölisi (annab vea
+  `could not resize shared memory segment ... No space left on device`).
+  `docker-compose.yml`-is on `db`-teenusele seetõttu seatud `shm_size: "1gb"`
+  — see on juba vaikimisi sees, midagi lisaks tegema ei pea.
 * **PostgreSQL-i konteineri enda mäluseaded** on juba paika pandud
   `docker-compose.yml`-is (`shared_buffers=256MB`, `maintenance_work_mem=512MB`,
   `max_wal_size=2GB`, `work_mem=32MB`) — need on mõõdukad väärtused, mis
@@ -572,6 +578,7 @@ psql "$DATABASE_URL" -At -c \
 | `permission denied for schema public` (PG 15+) | `sudo -u postgres psql -d rollerirent -c "GRANT ALL ON SCHEMA public TO rollerirent;"` |
 | Docker: pilt ei lae alla (`403`/`unknown: failed to resolve reference`) | Kontrolli internetiühendust Docker Hub'i (`registry-1.docker.io`); ettevõtte VPN/proxy või piiratud võrgupoliitika (nt CI-sandbox) võib registrile ligipääsu blokeerida |
 | Docker: `docker: unknown command: docker compose` | Puudub Compose v2 plugin — paigalda `docker-compose-v2` (Ubuntu/Debian: `apt-get install docker-compose-v2`) või uuenda Docker Desktop |
+| Docker: `could not resize shared memory segment ... No space left on device` | `/dev/shm` on liiga väike (Dockeri vaikimisi 64 MB). `docker-compose.yml`-is on `db`-teenusele juba `shm_size: "1gb"` — kui viga püsib, kontrolli, et repo on värskeim (`git pull`), ja tee `docker compose down` + `docker compose up -d db`, et konteiner uue seadega taasluua |
 | Täitmine liiga aeglane | Tõsta `PARALLEELSUS` CPU tuumade arvuni; Dockeris tõsta hostile eraldatud RAM/vCPU (p 3.8) |
 | Soovid kiiret proovi | `MASTAAP=0.01 bun run seed.ts` (kohalik) või `-e MASTAAP=0.05` Dockeris (p 3.6) |
 

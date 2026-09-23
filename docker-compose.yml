@@ -10,6 +10,11 @@ services:
       POSTGRES_DB: rollerirent
     ports:
       - "5432:5432"
+    # Docker piirab vaikimisi /dev/shm 64 MB peale, mis ei piisa PostgreSQL-i
+    # paralleeltööliste (indeksite loomine, VACUUM) jagatud mälu jaoks suure
+    # (2,6 mln+ rea) andmestiku juures — annab vea "could not resize shared
+    # memory segment ... No space left on device". 1 GB on siin piisav varu.
+    shm_size: "1gb"
     # Mäluseaded mass-sisestuseks: suuremad puhvrid kiirendavad COPY-t ja
     # indeksite taastamist oluliselt väiksema mahuga vaikeseadete peale.
     # Vt README p 3.8 "Vajalikud mäluseaded".
